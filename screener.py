@@ -1,88 +1,106 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
-import datetime
+import pandas as pd
+import numpy as np
 
-# Parameters
-STOCK_LIST = [
-    "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "KOTAKBANK.NS",
-    "SBIN.NS", "HINDUNILVR.NS", "ITC.NS", "AXISBANK.NS", "BAJFINANCE.NS", "ASIANPAINT.NS", "MARUTI.NS",
-    "HCLTECH.NS", "WIPRO.NS", "SUNPHARMA.NS", "ULTRACEMCO.NS", "POWERGRID.NS", "ONGC.NS", "COALINDIA.NS",
-    "NTPC.NS", "TITAN.NS", "NESTLEIND.NS", "TECHM.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "ADANIENT.NS",
-    "ADANIPORTS.NS", "BPCL.NS", "BHARTIARTL.NS", "BAJAJ-AUTO.NS", "HEROMOTOCO.NS", "EICHERMOT.NS",
-    "CIPLA.NS", "DIVISLAB.NS", "DRREDDY.NS", "BRITANNIA.NS", "HDFCLIFE.NS", "ICICIPRULI.NS", "SBILIFE.NS",
-    "BAJAJFINSV.NS", "M&M.NS", "GRASIM.NS", "HINDALCO.NS", "VEDL.NS", "AMBUJACEM.NS", "SHREECEM.NS",
-    "DABUR.NS", "PIDILITIND.NS", "GODREJCP.NS", "TATACONSUM.NS", "UBL.NS", "COLPAL.NS", "BERGEPAINT.NS",
-    "DMART.NS", "LICI.NS", "ZOMATO.NS", "PAYTM.NS", "IRCTC.NS", "BEL.NS", "HAL.NS", "NAUKRI.NS",
-    "POLYCAB.NS", "ABB.NS", "LUPIN.NS", "PAGEIND.NS", "INDIGO.NS", "ADANIGREEN.NS", "INDUSINDBK.NS",
-    "SRF.NS", "CHOLAFIN.NS", "IDFCFIRSTB.NS", "BANKBARODA.NS", "CANBK.NS", "FEDERALBNK.NS", "PNB.NS",
-    "UNIONBANK.NS", "IEX.NS", "MCX.NS", "HAVELLS.NS", "TORNTPHARM.NS", "GLAND.NS", "BOSCHLTD.NS",
-    "CONCOR.NS", "BANDHANBNK.NS", "RECLTD.NS", "BHEL.NS", "IOB.NS", "INDIANB.NS", "AUBANK.NS",
-    "YESBANK.NS", "RBLBANK.NS", "JINDALSTEL.NS", "TVSMOTOR.NS", "ATGL.NS", "ICICIGI.NS", "MFSL.NS",
-    "PFC.NS", "GAIL.NS", "ADANIPOWER.NS"
-]
-
-# Supertrend Indicator
-def calculate_supertrend(df, period=10, multiplier=3):
-    df['ATR'] = df['High'].rolling(window=period).max() - df['Low'].rolling(window=period).min()
-    df['Upper Basic'] = (df['High'] + df['Low']) / 2 + multiplier * df['ATR']
-    df['Lower Basic'] = (df['High'] + df['Low']) / 2 - multiplier * df['ATR']
-
-    df['Supertrend'] = df['Close']
-    for i in range(period, len(df)):
-        if df['Close'][i] > df['Upper Basic'][i-1]:
-            df.loc[df.index[i], 'Supertrend'] = df['Lower Basic'][i]
-        elif df['Close'][i] < df['Lower Basic'][i-1]:
-            df.loc[df.index[i], 'Supertrend'] = df['Upper Basic'][i]
-        else:
-            df.loc[df.index[i], 'Supertrend'] = df['Supertrend'][i-1]
-    return df
-
-# PRS2 and PRR2 logic
+# Function to calculate PRS2 and PRR2 (Pivot Range Support/Resistance 2)
 def calculate_pr_levels(df):
-    recent = df.iloc[-1]
-    high = recent['High']
-    low = recent['Low']
-    close = recent['Close']
-    prr2 = high + (high - low) * 0.618
-    prs2 = low - (high - low) * 0.618
-    return prr2, prs2
+    pivot = (df['High'] + df['Low'] + df['Close']) / 3
+    r2 = pivot + (pivot - df['Low']) * 1.5
+    s2 = pivot - (df['High'] - pivot) * 1.5
+    return s2.iloc[-1], r2.iloc[-1]
 
-st.title("📈 NSE 100 Stock Screener - PRS2/PRR2 + Supertrend")
-st.caption("Auto-refreshes every 15 minutes. Signals are not financial advice.")
+# Function to calculate Supertrend
+def calculate_supertrend(df, period=7, multiplier=3):
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    
+    atr = df['High'].rolling(window=period).max() - df['Low'].rolling(window=period).min()
+    atr = atr.rolling(window=period).mean()
+    
+    hl2 = (high + low) / 2
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
 
-screen_data = []
-progress = st.progress(0)
+    supertrend = [True] * len(df)
+    for i in range(1, len(df)):
+        if close.iloc[i] > upperband.iloc[i-1]:
+            supertrend[i] = True
+        elif close.iloc[i] < lowerband.iloc[i-1]:
+            supertrend[i] = False
+        else:
+            supertrend[i] = supertrend[i-1]
+    
+    return supertrend[-1]  # Return latest supertrend value: True=Uptrend, False=Downtrend
 
-for i, stock in enumerate(STOCK_LIST):
+# Function to fetch data from yfinance
+@st.cache_data(ttl=3600)
+def get_stock_data(ticker):
     try:
-        df = yf.download(stock, period="5d", interval="15m", progress=False)
-        df.dropna(inplace=True)
-        df = calculate_supertrend(df)
-        prr2, prs2 = calculate_pr_levels(df)
-        current = df.iloc[-1]
-        signal = ""
-        
-        # Buy signal: price crosses above PRS2 and above Supertrend
-        if current['Close'] > prs2 and current['Close'] > current['Supertrend']:
-            signal = "BUY"
-
-        screen_data.append({
-            "Symbol": stock.replace(".NS", ""),
-            "LTP": round(current['Close'], 2),
-            "PRS2": round(prs2, 2),
-            "PRR2": round(prr2, 2),
-            "Supertrend": round(current['Supertrend'], 2),
-            "Signal": signal
-        })
-
+        df = yf.download(ticker, period='20d', interval='1d', progress=False)
+        if df.empty:
+            return None
+        return df
     except Exception as e:
-        print(f"Error processing {stock}: {e}")
+        st.error(f"Error downloading data for {ticker}: {e}")
+        return None
 
-    progress.progress((i+1)/len(STOCK_LIST))
+def main():
+    st.title("NSE Stock Screener - PRS2/PRR2 + Supertrend")
 
-screener_df = pd.DataFrame(screen_data)
-screener_df = screener_df[screener_df['Signal'] == 'BUY']
+    # List of sample NSE stocks (replace with full NSE100 later)
+    stock_list = [
+        "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
+        "KOTAKBANK.NS", "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS"
+    ]
 
-st.success(f"{len(screener_df)} stocks meet PRS2 + Supertrend buy criteria")
-st.dataframe(screener_df, use_container_width=True)
+    st.write(f"Total stocks in screener: {len(stock_list)}")
+
+    buy_list = []
+    sell_list = []
+
+    for stock in stock_list:
+        df = get_stock_data(stock)
+        if df is None or df.empty:
+            st.warning(f"No data for {stock}")
+            continue
+
+        # Calculate PRS2 and PRR2
+        prs2, prr2 = calculate_pr_levels(df)
+
+        close = df['Close'].iloc[-1]
+
+        # Calculate supertrend (True=Uptrend, False=Downtrend)
+        supertrend = calculate_supertrend(df)
+
+        # Debug info (uncomment to see all)
+        # st.write(f"{stock}: Close={close:.2f}, PRS2={prs2:.2f}, PRR2={prr2:.2f}, Supertrend={'Up' if supertrend else 'Down'}")
+
+        # Buy condition: Close between PRS2 and PRR2 and supertrend up
+        if prs2 < close < prr2 and supertrend:
+            buy_list.append(stock)
+
+        # Sell condition: Close between PRS2 and PRR2 and supertrend down
+        elif prs2 < close < prr2 and not supertrend:
+            sell_list.append(stock)
+
+    # Show summary
+    st.success(f"Buy Signals: {len(buy_list)} | Sell Signals: {len(sell_list)}")
+
+    if len(buy_list) == 0 and len(sell_list) == 0:
+        st.info("No stocks currently meet Buy/Sell criteria.")
+
+    # Show watchlists
+    if buy_list:
+        st.subheader("Buy Watchlist")
+        for b in buy_list:
+            st.write(b)
+
+    if sell_list:
+        st.subheader("Sell Watchlist")
+        for s in sell_list:
+            st.write(s)
+
+if __name__ == "__main__":
+    main()

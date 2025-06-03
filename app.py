@@ -1,59 +1,97 @@
 import streamlit as st
-from nsepython import nse_eq, nse_fetch
-import yfinance as yf
+from nsepython import nsefetch
 import pandas as pd
+from datetime import datetime, timedelta
 
-st.title("NSE Top 500 Stocks - Basic Dashboard")
+st.title("NSE Predictive Range Watchlist")
 
-# Step 1: Fetch Top 500 NSE symbols
-with st.spinner("Fetching NSE top 500 symbols..."):
-    eq_data = nse_eq()
-    symbols = [item['symbol'] for item in eq_data['data']][:500]
+# Load top 500 symbols once and cache
+@st.cache_data(ttl=3600)
+def load_symbols():
+    eq = nsefetch("equity")  # fetch all equity symbols from NSE (may take time)
+    symbols = [item['symbol'] for item in eq['data'][:500]]  # top 500 stocks
+    return symbols
 
-st.write(f"Total stocks fetched: {len(symbols)}")
+symbols = load_symbols()
 
-# Optional: input filter for symbols
-search_text = st.text_input("Search symbol or company name (case insensitive):").strip().upper()
+selected_date = st.date_input("Select Date", datetime.today())
 
-# Container for fundamental + price data
-stocks_data = []
+# We want previous trading day for PR calculations
+def prev_trading_day(date):
+    prev_day = date - timedelta(days=1)
+    # For simplicity, assume prev_day is trading day (can enhance with holiday calendar)
+    return prev_day
 
-with st.spinner("Fetching fundamentals and price data... This can take a while..."):
-    for symbol in symbols:
-        try:
-            # Fetch fundamentals from nsepython
-            fund_data = nse_fetch(f"quote-equity?symbol={symbol}")
+prev_date = prev_trading_day(selected_date)
 
-            # Fetch recent price data from yfinance (last close)
-            ticker = symbol + ".NS"
-            yf_data = yf.Ticker(ticker)
-            hist = yf_data.history(period="5d")
-            last_close = hist['Close'][-1] if not hist.empty else None
-            volume = hist['Volume'][-1] if not hist.empty else None
+def fetch_ohlc(symbol, date):
+    """Fetch OHLC data for symbol on given date using nsefetch 'historical' endpoint."""
+    # Date format for NSE API: 'dd-mm-yyyy'
+    date_str = date.strftime("%d-%m-%Y")
+    try:
+        df = nsefetch(f"historical/{symbol}/{date_str}/{date_str}")
+        if 'data' in df and len(df['data']) > 0:
+            record = df['data'][0]
+            return {
+                'open': float(record['openPrice']),
+                'high': float(record['dayHigh']),
+                'low': float(record['dayLow']),
+                'close': float(record['closePrice'])
+            }
+    except Exception as e:
+        pass
+    return None
 
-            # Basic fundamental metrics from nse_fetch response
-            market_cap = fund_data.get('marketCap', None)
-            pe_ratio = fund_data.get('PE', None)
-            name = fund_data.get('companyName', symbol)
+st.info(f"Fetching and calculating for {len(symbols)} stocks, please wait...")
 
-            if search_text and search_text not in symbol and search_text not in str(name).upper():
-                continue
+watchlist = []
 
-            stocks_data.append({
+for symbol in symbols:
+    prev_data = fetch_ohlc(symbol, prev_date)
+    today_data = fetch_ohlc(symbol, selected_date)
+    if prev_data and today_data:
+        prev_high = prev_data['high']
+        prev_low = prev_data['low']
+        prev_close = prev_data['close']
+        today_open = today_data['open']
+        today_high = today_data['high']
+        today_low = today_data['low']
+        today_close = today_data['close']
+
+        range_ = prev_high - prev_low
+        PRS2 = prev_low - 0.5 * range_
+        PRR2 = prev_high + 0.5 * range_
+        middle_line = (PRS2 + PRR2) / 2
+
+        # Check touched upper and reversed
+        touched_upper_reversed = today_high >= PRR2 and today_close < PRR2
+
+        # Check touched lower and reversed
+        touched_lower_reversed = today_low <= PRS2 and today_close > PRS2
+
+        # Check touched middle and reversed (close crossed middle line opposite to open)
+        touched_middle = today_high >= middle_line and today_low <= middle_line
+        crossed_middle_reversed = False
+        if touched_middle:
+            if (today_open > middle_line and today_close < middle_line) or (today_open < middle_line and today_close > middle_line):
+                crossed_middle_reversed = True
+
+        if touched_upper_reversed or touched_lower_reversed or crossed_middle_reversed:
+            watchlist.append({
                 "Symbol": symbol,
-                "Name": name,
-                "Market Cap": market_cap,
-                "PE Ratio": pe_ratio,
-                "Last Close": last_close,
-                "Volume": volume,
+                "PRS2": round(PRS2, 2),
+                "PRR2": round(PRR2, 2),
+                "Middle": round(middle_line, 2),
+                "Touched Upper & Reversed": touched_upper_reversed,
+                "Touched Lower & Reversed": touched_lower_reversed,
+                "Touched Middle & Reversed": crossed_middle_reversed,
+                "Date": selected_date.strftime("%Y-%m-%d")
             })
-        except Exception as e:
-            # Optional: st.write(f"Error fetching data for {symbol}: {e}")
-            continue
 
-# Create DataFrame and display
-df = pd.DataFrame(stocks_data)
-st.dataframe(df)
-
-# TODO: Add button or UI to proceed to Step 2 (technical strategy)
+if watchlist:
+    df_watchlist = pd.DataFrame(watchlist)
+    st.write(f"### Watchlist for {selected_date.strftime('%Y-%m-%d')}")
+    st.dataframe(df_watchlist)
+else:
+    st.write("No stocks matched the criteria for the selected date.")
 

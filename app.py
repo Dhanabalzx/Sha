@@ -1,78 +1,96 @@
 import streamlit as st
-import pandas as pd
-import datetime
-from nsepython import *
-from nsepython.server import nsefetch
+from nsepython import nse_eq, nsefetch
 import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
-st.set_page_config(layout="wide")
-st.title("📊 Bank Nifty Daily Watchlist - PRR2/PRS2 Strategy")
+# Function to calculate Bollinger Bands
+def bollinger_bands(df, window=20, num_std=2):
+    df['MA20'] = df['Close'].rolling(window=window).mean()
+    df['STD20'] = df['Close'].rolling(window=window).std()
+    df['Upper'] = df['MA20'] + (num_std * df['STD20'])
+    df['Lower'] = df['MA20'] - (num_std * df['STD20'])
+    return df
 
-# Load static list of NSE top 500 stocks
-symbol_df = pd.read_csv("nse_top_500_symbols.csv")
-symbols = symbol_df["Symbol"].tolist()
+# Function to check if price touched bands and reversed
+def check_band_touch(df):
+    results = []
+    for i in range(1, len(df)):
+        prev = df.iloc[i-1]
+        curr = df.iloc[i]
 
-# User date selection
-date_selected = st.date_input("Select a date to analyze", datetime.date.today())
+        # Touched Upper Band and reversed down
+        touched_upper = (prev['Close'] <= prev['Upper']) and (curr['Close'] > curr['Upper']) and (curr['Close'] < prev['Close'])
 
-# Parameters for PRS2 and PRR2 calculation
-PR_MULTIPLIER = 0.618  # Can be made user-configurable later
+        # Touched Lower Band and reversed up
+        touched_lower = (prev['Close'] >= prev['Lower']) and (curr['Close'] < curr['Lower']) and (curr['Close'] > prev['Close'])
 
-# Lists to capture results
-touched_upper = []
-touched_lower = []
-touched_middle_reversed = []
+        # Touched Middle Band and reversed (crossing MA20)
+        touched_middle_up = (prev['Close'] < prev['MA20']) and (curr['Close'] >= curr['MA20'])
+        touched_middle_down = (prev['Close'] > prev['MA20']) and (curr['Close'] <= curr['MA20'])
 
-progress_bar = st.progress(0)
-status_text = st.empty()
+        if touched_upper:
+            results.append('Touched Upper and Reversed Down')
+        elif touched_lower:
+            results.append('Touched Lower and Reversed Up')
+        elif touched_middle_up:
+            results.append('Touched Middle and Reversed Up')
+        elif touched_middle_down:
+            results.append('Touched Middle and Reversed Down')
+        else:
+            results.append(None)
+    results.insert(0, None)  # first day no data to compare
+    df['Signal'] = results
+    return df
 
-for i, symbol in enumerate(symbols):
-    try:
-        data = yf.download(f"{symbol}.NS", period="30d", interval="1d")
-        if data.empty or date_selected.strftime('%Y-%m-%d') not in data.index.strftime('%Y-%m-%d'):
+st.title("NSE Top 500 Stocks Bollinger Band Watchlist")
+
+# Select date input for analysis
+selected_date = st.date_input("Select date to check:", datetime.today())
+
+# Fetch NSE top 500 stocks symbols
+with st.spinner('Fetching NSE top 500 symbols...'):
+    eq_data = nse_eq()
+    symbols = [item['symbol'] for item in eq_data['data']][:500]
+
+st.write(f"Total symbols fetched: {len(symbols)}")
+
+watchlist = []
+
+with st.spinner('Processing stock data, this may take a few minutes...'):
+    for symbol in symbols:
+        try:
+            ticker = symbol + ".NS"  # Yahoo Finance NSE ticker format
+            df = yf.download(ticker, period="60d", interval="1d", progress=False)
+            if df.empty:
+                continue
+            
+            # Calculate Bollinger Bands
+            df = bollinger_bands(df)
+            df = check_band_touch(df)
+
+            # Check if selected date in df index
+            date_str = selected_date.strftime('%Y-%m-%d')
+            if date_str in df.index.strftime('%Y-%m-%d'):
+                row = df.loc[date_str]
+                if row['Signal'] is not None:
+                    watchlist.append({
+                        'Symbol': symbol,
+                        'Date': date_str,
+                        'Signal': row['Signal'],
+                        'Close': row['Close'],
+                        'Upper': row['Upper'],
+                        'Middle': row['MA20'],
+                        'Lower': row['Lower']
+                    })
+        except Exception as e:
+            # Optional: print(f"Error with {symbol}: {e}")
             continue
 
-        row = data.loc[date_selected.strftime('%Y-%m-%d')]
+if watchlist:
+    df_watchlist = pd.DataFrame(watchlist)
+    st.dataframe(df_watchlist)
+else:
+    st.write("No stocks matched the criteria on the selected date.")
 
-        high = row['High']
-        low = row['Low']
-        close = row['Close']
-        open_price = row['Open']
-
-        pr_high = high + (high - low) * PR_MULTIPLIER
-        pr_low = low - (high - low) * PR_MULTIPLIER
-        middle = (pr_high + pr_low) / 2
-
-        # Check your strategy conditions
-        if high >= pr_high:
-            touched_upper.append(symbol)
-        elif low <= pr_low:
-            touched_lower.append(symbol)
-        elif (open_price < middle and close > middle) or (open_price > middle and close < middle):
-            touched_middle_reversed.append(symbol)
-
-    except Exception as e:
-        continue
-    progress_bar.progress((i + 1) / len(symbols))
-    status_text.text(f"Processing {i+1}/{len(symbols)}: {symbol}")
-
-progress_bar.empty()
-status_text.empty()
-
-st.subheader(f"Results for {date_selected.strftime('%d-%m-%Y')}")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.markdown("### 📈 Touched Upper Line")
-    st.write(touched_upper if touched_upper else "None")
-
-with col2:
-    st.markdown("### 📉 Touched Lower Line")
-    st.write(touched_lower if touched_lower else "None")
-
-with col3:
-    st.markdown("### 🔄 Middle Line Reversal")
-    st.write(touched_middle_reversed if touched_middle_reversed else "None")
-
-st.success("Analysis complete. You may change the date to rerun.")

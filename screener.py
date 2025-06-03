@@ -1,21 +1,14 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 
-# Function to calculate PRS2 and PRR2 (Pivot Range Support/Resistance 2)
-def calculate_pr_levels(df):
-    pivot = (df['High'] + df['Low'] + df['Close']) / 3
-    r2 = pivot + (pivot - df['Low']) * 1.5
-    s2 = pivot - (df['High'] - pivot) * 1.5
-    return s2.iloc[-1], r2.iloc[-1]
-
-# Function to calculate Supertrend
+# Supertrend calculation fix with NaN handling
 def calculate_supertrend(df, period=7, multiplier=3):
     high = df['High']
     low = df['Low']
     close = df['Close']
     
+    # ATR calculation (simple approximation)
     atr = df['High'].rolling(window=period).max() - df['Low'].rolling(window=period).min()
     atr = atr.rolling(window=period).mean()
     
@@ -24,83 +17,91 @@ def calculate_supertrend(df, period=7, multiplier=3):
     lowerband = hl2 - (multiplier * atr)
 
     supertrend = [True] * len(df)
-    for i in range(1, len(df)):
+
+    start_idx = period * 2  # skip initial NaNs for rolling
+
+    for i in range(start_idx, len(df)):
+        # Handle NaN values gracefully
+        if pd.isna(upperband.iloc[i-1]) or pd.isna(lowerband.iloc[i-1]) or pd.isna(close.iloc[i]):
+            supertrend[i] = supertrend[i-1]
+            continue
+
         if close.iloc[i] > upperband.iloc[i-1]:
             supertrend[i] = True
         elif close.iloc[i] < lowerband.iloc[i-1]:
             supertrend[i] = False
         else:
             supertrend[i] = supertrend[i-1]
-    
-    return supertrend[-1]  # Return latest supertrend value: True=Uptrend, False=Downtrend
 
-# Function to fetch data from yfinance
-@st.cache_data(ttl=3600)
-def get_stock_data(ticker):
-    try:
-        df = yf.download(ticker, period='20d', interval='1d', progress=False)
-        if df.empty:
-            return None
-        return df
-    except Exception as e:
-        st.error(f"Error downloading data for {ticker}: {e}")
-        return None
+    # Fill early values with True (or you can decide another default)
+    for i in range(start_idx):
+        supertrend[i] = True
+
+    return supertrend[-1]
+
+# Calculate PRS2 and PRR2 based on pivot points
+def calculate_pivot_points(df):
+    high = df['High'].iloc[-2]
+    low = df['Low'].iloc[-2]
+    close = df['Close'].iloc[-2]
+
+    pivot = (high + low + close) / 3
+    R1 = 2 * pivot - low
+    S1 = 2 * pivot - high
+    R2 = pivot + (high - low)
+    S2 = pivot - (high - low)
+    return S2, R2
+
+def get_signal(df):
+    prs2, prr2 = calculate_pivot_points(df)
+    supertrend = calculate_supertrend(df)
+
+    last_close = df['Close'].iloc[-1]
+
+    if last_close <= prs2 and supertrend:
+        return "Buy"
+    elif last_close >= prr2 and not supertrend:
+        return "Sell"
+    else:
+        return "Hold"
 
 def main():
-    st.title("NSE Stock Screener - PRS2/PRR2 + Supertrend")
+    st.title("NSE 100 Stocks Screener: PRS2/PRR2 + Supertrend Strategy")
 
-    # List of sample NSE stocks (replace with full NSE100 later)
-    stock_list = [
+    # Load list of NSE 100 stocks - minimal list example; replace with full list or dynamic source
+    stocks = [
         "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
-        "KOTAKBANK.NS", "HINDUNILVR.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS"
+        "KOTAKBANK.NS", "HINDUNILVR.NS", "SBIN.NS", "AXISBANK.NS", "LT.NS"
     ]
 
-    st.write(f"Total stocks in screener: {len(stock_list)}")
+    selected_stocks = st.multiselect("Select Stocks to Screen", stocks, default=stocks[:5])
 
     buy_list = []
     sell_list = []
+    hold_list = []
 
-    for stock in stock_list:
-        df = get_stock_data(stock)
-        if df is None or df.empty:
-            st.warning(f"No data for {stock}")
+    for stock in selected_stocks:
+        df = yf.download(stock, period="15d", interval="1d")  # 15 days for pivot + supertrend calculation
+        if df.empty or len(df) < 10:
+            st.warning(f"No sufficient data for {stock}")
             continue
 
-        # Calculate PRS2 and PRR2
-        prs2, prr2 = calculate_pr_levels(df)
-
-        close = df['Close'].iloc[-1]
-
-        # Calculate supertrend (True=Uptrend, False=Downtrend)
-        supertrend = calculate_supertrend(df)
-
-        # Debug info (uncomment to see all)
-        # st.write(f"{stock}: Close={close:.2f}, PRS2={prs2:.2f}, PRR2={prr2:.2f}, Supertrend={'Up' if supertrend else 'Down'}")
-
-        # Buy condition: Close between PRS2 and PRR2 and supertrend up
-        if prs2 < close < prr2 and supertrend:
+        signal = get_signal(df)
+        if signal == "Buy":
             buy_list.append(stock)
-
-        # Sell condition: Close between PRS2 and PRR2 and supertrend down
-        elif prs2 < close < prr2 and not supertrend:
+        elif signal == "Sell":
             sell_list.append(stock)
+        else:
+            hold_list.append(stock)
 
-    # Show summary
-    st.success(f"Buy Signals: {len(buy_list)} | Sell Signals: {len(sell_list)}")
+    st.subheader("Buy Signals")
+    st.write(buy_list if buy_list else "No Buy Signals")
 
-    if len(buy_list) == 0 and len(sell_list) == 0:
-        st.info("No stocks currently meet Buy/Sell criteria.")
+    st.subheader("Sell Signals")
+    st.write(sell_list if sell_list else "No Sell Signals")
 
-    # Show watchlists
-    if buy_list:
-        st.subheader("Buy Watchlist")
-        for b in buy_list:
-            st.write(b)
-
-    if sell_list:
-        st.subheader("Sell Watchlist")
-        for s in sell_list:
-            st.write(s)
+    st.subheader("Hold Signals")
+    st.write(hold_list if hold_list else "No Hold Signals")
 
 if __name__ == "__main__":
     main()

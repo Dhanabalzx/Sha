@@ -1,110 +1,114 @@
 import streamlit as st
-from nsepython import nsefetch
-import yfinance as yf
 import pandas as pd
-import datetime
-from typing import List
+import yfinance as yf
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="NSE Daily PRS2/PRR2 Watchlist", layout="wide")
+st.title("NSE Predictive Range Watchlist")
 
-@st.cache_data(ttl=3600)
-def load_symbols() -> List[str]:
-    eq = nsefetch("equity")
-    if isinstance(eq, dict) and 'data' in eq:
-        symbols = [item['symbol'] + ".NS" for item in eq['data'][:500]]  # add ".NS" suffix for yfinance NSE tickers
+@st.cache_data(ttl=86400)
+def load_symbols():
+    try:
+        df = pd.read_csv("nse_top_symbols.csv")
+        symbols = df['symbol'].tolist()
         return symbols
-    else:
-        st.error("Failed to fetch symbols or unexpected response structure from NSE API.")
+    except Exception as e:
+        st.error(f"Failed to load symbols CSV: {e}")
         return []
 
-def calculate_prs_prr(df: pd.DataFrame):
+def fetch_daily_data(symbol, start_date, end_date):
+    try:
+        data = yf.download(symbol, start=start_date, end=end_date, interval="1d", progress=False)
+        return data
+    except Exception as e:
+        st.error(f"Failed to fetch data for {symbol}: {e}")
+        return pd.DataFrame()
+
+def calculate_predictive_ranges(df):
     """
-    Calculates PRS2, PRR2, and middle line based on your provided logic.
-    Example logic for demonstration - adjust formulas as per your exact specs.
+    Your predictive range logic based on daily OHLC:
+    Assuming your logic is:
+    - PRS2 = Close - 0.03*Close (3% below close)
+    - PRR2 = Close + 0.03*Close (3% above close)
+    - Middle line = Close
+
+    You can replace this logic with your exact formulas.
     """
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    
-    # Your predictive range formula (example placeholders)
-    prs2 = close + (high - low) * 0.5  # Replace with your exact PRS2 formula
-    prr2 = close - (high - low) * 0.5  # Replace with your exact PRR2 formula
-    middle = (prs2 + prr2) / 2
-
-    return prs2, prr2, middle
-
-def check_touch_and_reversal(df: pd.DataFrame, prs2: pd.Series, prr2: pd.Series, middle: pd.Series):
-    """
-    For the selected day, check if the price touched or reversed from PRS2, PRR2, or middle line.
-    Returns True/False for each condition.
-    """
-    # Take last row - the selected day
-    day = df.iloc[-1]
-    # For reversal, check if price moved towards then away from the line within the day or compared to prior day close
-    # This is a simplified example, customize logic as per your exact rules.
-
-    touched_prs2 = day['High'] >= prs2.iloc[-1]
-    reversed_prs2 = day['High'] >= prs2.iloc[-1] and day['Close'] < prs2.iloc[-1]
-
-    touched_prr2 = day['Low'] <= prr2.iloc[-1]
-    reversed_prr2 = day['Low'] <= prr2.iloc[-1] and day['Close'] > prr2.iloc[-1]
-
-    touched_middle = (day['Low'] <= middle.iloc[-1] <= day['High'])
-    reversed_middle = (day['Low'] <= middle.iloc[-1] <= day['High']) and abs(day['Close'] - middle.iloc[-1]) > abs(day['Open'] - middle.iloc[-1])
-
-    return {
-        "Touched_PRS2": touched_prs2,
-        "Reversed_PRS2": reversed_prs2,
-        "Touched_PRR2": touched_prr2,
-        "Reversed_PRR2": reversed_prr2,
-        "Touched_Middle": touched_middle,
-        "Reversed_Middle": reversed_middle
-    }
-
-@st.cache_data(ttl=3600)
-def fetch_data(symbol: str, start_date: datetime.date, end_date: datetime.date) -> pd.DataFrame:
-    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+    df = df.copy()
+    df['PRS2'] = df['Close'] * 0.97
+    df['PRR2'] = df['Close'] * 1.03
+    df['Middle'] = df['Close']
     return df
 
-def main():
-    st.title("NSE Top 500 Stocks Daily PRS2/PRR2 Watchlist")
-    
-    symbols = load_symbols()
-    if not symbols:
-        st.stop()
+def check_touches_and_reversals(df, check_date):
+    """
+    For the given date (check_date), check if:
+    - price touched upper line (PRR2) and reversed (closed below PRR2)
+    - price touched lower line (PRS2) and reversed (closed above PRS2)
+    - price touched middle line and reversed
 
-    selected_date = st.date_input("Select Date", datetime.date.today())
-    st.write(f"Analyzing for date: {selected_date}")
+    We can define "touched" as High >= line or Low <= line
+    "Reversed" means price moves back away from line by close price relative position.
+    """
+    row = df.loc[df.index == check_date]
+    if row.empty:
+        return None  # no data for this date
 
-    start_date = selected_date - datetime.timedelta(days=10)  # buffer days to have data for calculation
-    end_date = selected_date + datetime.timedelta(days=1)
+    row = row.iloc[0]
 
-    watchlist = []
+    touched_upper = (row['High'] >= row['PRR2']) and (row['Close'] < row['PRR2'])
+    touched_lower = (row['Low'] <= row['PRS2']) and (row['Close'] > row['PRS2'])
+    touched_middle = ((row['High'] >= row['Middle']) and (row['Close'] < row['Middle'])) or \
+                     ((row['Low'] <= row['Middle']) and (row['Close'] > row['Middle']))
 
-    with st.spinner(f"Fetching and analyzing data for {len(symbols)} stocks... This may take some minutes."):
+    result = []
+    if touched_upper:
+        result.append('Touched Upper Line and Reversed')
+    if touched_lower:
+        result.append('Touched Lower Line and Reversed')
+    if touched_middle:
+        result.append('Touched Middle Line and Reversed')
 
-        for symbol in symbols:
-            df = fetch_data(symbol, start_date, end_date)
-            if df.empty or selected_date not in df.index:
-                continue
+    if not result:
+        return None
+    return ', '.join(result)
 
-            df = df.loc[:selected_date]  # only data up to selected_date
+# Load symbols from CSV
+symbols = load_symbols()
+if not symbols:
+    st.stop()
 
-            prs2, prr2, middle = calculate_prs_prr(df)
+# User input for date
+selected_date = st.date_input("Select date for watchlist", datetime.today())
+selected_date_str = selected_date.strftime('%Y-%m-%d')
 
-            signals = check_touch_and_reversal(df, prs2, prr2, middle)
+st.write(f"Generating watchlist for {selected_date_str}...")
 
-            if any(signals.values()):
-                watchlist.append({
-                    "Symbol": symbol.replace(".NS", ""),
-                    **signals
-                })
+# We will fetch data from one day before selected_date to selected_date to ensure data is available
+start_date = (selected_date - timedelta(days=5)).strftime('%Y-%m-%d')
+end_date = (selected_date + timedelta(days=1)).strftime('%Y-%m-%d')
 
-    if watchlist:
-        df_watchlist = pd.DataFrame(watchlist)
-        st.dataframe(df_watchlist)
-    else:
-        st.info("No stocks touched or reversed at PRS2, PRR2 or middle line on selected date.")
+results = []
 
-if __name__ == "__main__":
-    main()
+progress_bar = st.progress(0)
+total = len(symbols)
+
+for idx, symbol in enumerate(symbols):
+    data = fetch_daily_data(symbol, start_date, end_date)
+    if data.empty or selected_date not in data.index:
+        progress_bar.progress((idx + 1) / total)
+        continue
+
+    data = calculate_predictive_ranges(data)
+    res = check_touches_and_reversals(data, selected_date)
+    if res:
+        results.append({'Symbol': symbol, 'Signal': res})
+
+    progress_bar.progress((idx + 1) / total)
+
+if results:
+    df_results = pd.DataFrame(results)
+    st.success(f"Found {len(results)} stocks matching criteria on {selected_date_str}:")
+    st.dataframe(df_results)
+else:
+    st.info(f"No stocks touched and reversed on lines for {selected_date_str}")
+

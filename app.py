@@ -1,96 +1,59 @@
 import streamlit as st
-from nsepython import nse_eq, nsefetch
+from nsepython import nse_eq, nse_fetch
 import yfinance as yf
 import pandas as pd
-import numpy as np
-from datetime import datetime
 
-# Function to calculate Bollinger Bands
-def bollinger_bands(df, window=20, num_std=2):
-    df['MA20'] = df['Close'].rolling(window=window).mean()
-    df['STD20'] = df['Close'].rolling(window=window).std()
-    df['Upper'] = df['MA20'] + (num_std * df['STD20'])
-    df['Lower'] = df['MA20'] - (num_std * df['STD20'])
-    return df
+st.title("NSE Top 500 Stocks - Basic Dashboard")
 
-# Function to check if price touched bands and reversed
-def check_band_touch(df):
-    results = []
-    for i in range(1, len(df)):
-        prev = df.iloc[i-1]
-        curr = df.iloc[i]
-
-        # Touched Upper Band and reversed down
-        touched_upper = (prev['Close'] <= prev['Upper']) and (curr['Close'] > curr['Upper']) and (curr['Close'] < prev['Close'])
-
-        # Touched Lower Band and reversed up
-        touched_lower = (prev['Close'] >= prev['Lower']) and (curr['Close'] < curr['Lower']) and (curr['Close'] > prev['Close'])
-
-        # Touched Middle Band and reversed (crossing MA20)
-        touched_middle_up = (prev['Close'] < prev['MA20']) and (curr['Close'] >= curr['MA20'])
-        touched_middle_down = (prev['Close'] > prev['MA20']) and (curr['Close'] <= curr['MA20'])
-
-        if touched_upper:
-            results.append('Touched Upper and Reversed Down')
-        elif touched_lower:
-            results.append('Touched Lower and Reversed Up')
-        elif touched_middle_up:
-            results.append('Touched Middle and Reversed Up')
-        elif touched_middle_down:
-            results.append('Touched Middle and Reversed Down')
-        else:
-            results.append(None)
-    results.insert(0, None)  # first day no data to compare
-    df['Signal'] = results
-    return df
-
-st.title("NSE Top 500 Stocks Bollinger Band Watchlist")
-
-# Select date input for analysis
-selected_date = st.date_input("Select date to check:", datetime.today())
-
-# Fetch NSE top 500 stocks symbols
-with st.spinner('Fetching NSE top 500 symbols...'):
+# Step 1: Fetch Top 500 NSE symbols
+with st.spinner("Fetching NSE top 500 symbols..."):
     eq_data = nse_eq()
     symbols = [item['symbol'] for item in eq_data['data']][:500]
 
-st.write(f"Total symbols fetched: {len(symbols)}")
+st.write(f"Total stocks fetched: {len(symbols)}")
 
-watchlist = []
+# Optional: input filter for symbols
+search_text = st.text_input("Search symbol or company name (case insensitive):").strip().upper()
 
-with st.spinner('Processing stock data, this may take a few minutes...'):
+# Container for fundamental + price data
+stocks_data = []
+
+with st.spinner("Fetching fundamentals and price data... This can take a while..."):
     for symbol in symbols:
         try:
-            ticker = symbol + ".NS"  # Yahoo Finance NSE ticker format
-            df = yf.download(ticker, period="60d", interval="1d", progress=False)
-            if df.empty:
-                continue
-            
-            # Calculate Bollinger Bands
-            df = bollinger_bands(df)
-            df = check_band_touch(df)
+            # Fetch fundamentals from nsepython
+            fund_data = nse_fetch(f"quote-equity?symbol={symbol}")
 
-            # Check if selected date in df index
-            date_str = selected_date.strftime('%Y-%m-%d')
-            if date_str in df.index.strftime('%Y-%m-%d'):
-                row = df.loc[date_str]
-                if row['Signal'] is not None:
-                    watchlist.append({
-                        'Symbol': symbol,
-                        'Date': date_str,
-                        'Signal': row['Signal'],
-                        'Close': row['Close'],
-                        'Upper': row['Upper'],
-                        'Middle': row['MA20'],
-                        'Lower': row['Lower']
-                    })
+            # Fetch recent price data from yfinance (last close)
+            ticker = symbol + ".NS"
+            yf_data = yf.Ticker(ticker)
+            hist = yf_data.history(period="5d")
+            last_close = hist['Close'][-1] if not hist.empty else None
+            volume = hist['Volume'][-1] if not hist.empty else None
+
+            # Basic fundamental metrics from nse_fetch response
+            market_cap = fund_data.get('marketCap', None)
+            pe_ratio = fund_data.get('PE', None)
+            name = fund_data.get('companyName', symbol)
+
+            if search_text and search_text not in symbol and search_text not in str(name).upper():
+                continue
+
+            stocks_data.append({
+                "Symbol": symbol,
+                "Name": name,
+                "Market Cap": market_cap,
+                "PE Ratio": pe_ratio,
+                "Last Close": last_close,
+                "Volume": volume,
+            })
         except Exception as e:
-            # Optional: print(f"Error with {symbol}: {e}")
+            # Optional: st.write(f"Error fetching data for {symbol}: {e}")
             continue
 
-if watchlist:
-    df_watchlist = pd.DataFrame(watchlist)
-    st.dataframe(df_watchlist)
-else:
-    st.write("No stocks matched the criteria on the selected date.")
+# Create DataFrame and display
+df = pd.DataFrame(stocks_data)
+st.dataframe(df)
+
+# TODO: Add button or UI to proceed to Step 2 (technical strategy)
 

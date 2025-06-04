@@ -4,3 +4,4 @@ numpy
 nsepython
 ta
 yfinance
+requests
